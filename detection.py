@@ -22,7 +22,7 @@ def fingers_up(hand_landmarks):
     else:
         fingers.append(0)
 
-    # Other four fingers
+    # Index, Middle, Ring, Pinky
     for i in range(1, 5):
         if hand_landmarks.landmark[tips[i]].y < hand_landmarks.landmark[pips[i]].y:
             fingers.append(1)
@@ -34,31 +34,83 @@ def fingers_up(hand_landmarks):
 
 def detect_gesture(hand_landmarks):
     fingers = fingers_up(hand_landmarks)
-    total = sum(fingers)
+
+    index_tip = hand_landmarks.landmark[8]
+    index_pip = hand_landmarks.landmark[6]
 
     thumb_tip = hand_landmarks.landmark[4]
-    index_tip = hand_landmarks.landmark[8]
+    thumb_ip = hand_landmarks.landmark[3]
 
-    # Pinch detection
-    if distance(thumb_tip, index_tip) < 0.05:
-        return "PINCH"
+    # Pinch controls slider
+    pinch_dist = distance(thumb_tip, index_tip)
+    if pinch_dist < 0.05:
+        # Convert vertical index finger position to 100% -> 0%
+        # Top of screen = 100%, bottom = 0%
+        value = int((1.0 - index_tip.y) * 100)
+        value = max(0, min(100, value))
+        return "PINCH", value
 
-    # Basic gestures
+    # Pointing gestures: only index finger extended
+    if fingers == [0, 1, 0, 0, 0]:
+        # Compare tip and PIP position to determine direction
+        if index_tip.y < index_pip.y:
+            return "POINT UP", None
+        elif index_tip.y > index_pip.y:
+            return "POINT DOWN", None
+        else:
+            return "POINTING", None
+
+    # Existing gestures
+    total = sum(fingers)
+
     if total == 0:
-        return "FIST"
+        return "FIST", None
     elif total == 5:
-        return "OPEN PALM"
-    elif fingers == [0, 1, 0, 0, 0]:
-        return "POINTING"
+        return "OPEN PALM", None
     elif fingers == [0, 1, 1, 0, 0]:
-        return "PEACE"
+        return "PEACE", None
     elif fingers == [1, 0, 0, 0, 0]:
-        return "THUMBS UP"
+        # Rough thumbs up check
+        if thumb_tip.y < thumb_ip.y:
+            return "THUMBS UP", None
 
-    return "UNKNOWN"
+    return "UNKNOWN", None
 
 
-cap = cv2.VideoCapture(0)
+def draw_slider(frame, value):
+    x = 50
+    y = 100
+    w = 40
+    h = 300
+
+    # Outline
+    cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 255, 255), 2)
+
+    # Fill from bottom to top
+    fill_h = int(h * value / 100)
+    cv2.rectangle(
+        frame,
+        (x, y + h - fill_h),
+        (x + w, y + h),
+        (0, 255, 0),
+        -1
+    )
+
+    # Percentage text
+    cv2.putText(
+        frame,
+        f"{value}%",
+        (x - 10, y + h + 40),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1,
+        (0, 255, 0),
+        2
+    )
+
+
+cap = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)
+
+slider_value = 50
 
 with mp_hands.Hands(
     static_image_mode=False,
@@ -85,8 +137,13 @@ with mp_hands.Hands(
                     hand_landmarks,
                     mp_hands.HAND_CONNECTIONS
                 )
-                gesture = detect_gesture(hand_landmarks)
 
+                gesture, value = detect_gesture(hand_landmarks)
+
+                if gesture == "PINCH" and value is not None:
+                    slider_value = value
+
+        # Display gesture
         cv2.putText(
             frame,
             gesture,
@@ -97,7 +154,9 @@ with mp_hands.Hands(
             3
         )
 
-        cv2.imshow("Hand Gesture Detector", frame)
+        draw_slider(frame, slider_value)
+
+        cv2.imshow("Hand Gesture Controller", frame)
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
