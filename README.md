@@ -2,12 +2,14 @@
 
 simple `mediapipe` based gesture detector using python.
 
-## GOALS
+## Phase 1 goals
 
-- [ ] basic gesture detection
-- [ ] covert detected gestures to api response
-- [ ] integrate with [litey](https://github.com/harshith-ashok/litey)
+- [x] basic gesture detection
+- [x] covert detected gestures to api response
+- [x] integrate with [litey](https://github.com/harshith-ashok/litey)
 
-## Current Status
+## Current iteration
 
-Initial Commit
+1. Gradio UI for dashboard
+2. FastAPI api for litey integration
+3. `device_state.json` file for rudimentary status and session storage
