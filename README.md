@@ -13,3 +13,8 @@ simple `mediapipe` based gesture detector using python.
 1. Gradio UI for dashboard
 2. FastAPI api for litey integration
 3. `device_state.json` file for rudimentary status and session storage
+
+## Phase 2 goals
+
+- [ ] deploy in Jetson Nano
+- [ ] Add rpi camera support and verify
