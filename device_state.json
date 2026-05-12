@@ -1,16 +1,16 @@
 {
   "devices": {
     "Main Light": {
-      "status": 0
+      "status": 1
     },
     "Ceiling Fan": {
       "status": 1,
-      "value": 69
+      "value": 100
     },
     "Accent Light": {
-      "status": 0,
-      "color": "red"
+      "status": 1,
+      "color": "green"
     }
   },
-  "last_updated": "2026-05-11T07:24:06.623366"
+  "last_updated": "2026-05-12T09:28:49.914969"
 }

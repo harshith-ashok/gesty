@@ -18,3 +18,4 @@ simple `mediapipe` based gesture detector using python.
 
 - [ ] deploy in Jetson Nano
 - [ ] Add rpi camera support and verify
+- [ ] Native audio controls
