@@ -2,3 +2,5 @@ fastapi
 opencv-python
 mediapipe
 gradio
+tensorflow
+numpy
