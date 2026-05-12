@@ -4,3 +4,6 @@ mediapipe
 gradio
 tensorflow
 numpy
+ultralytics
+numpy
+Pillow

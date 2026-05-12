@@ -1,95 +1,75 @@
-import cv2
-import numpy as np
+# object_classifier.py
+
 from pathlib import Path
-import tensorflow as tf
-from tensorflow.keras.applications.mobilenet_v2 import (
-    MobileNetV2,
-    preprocess_input,
-    decode_predictions
-)
-from tensorflow.keras.preprocessing import image
-
-MODEL_DIR = Path("custom_model")
-MODEL_PATH = MODEL_DIR / "model.keras"
-CLASS_NAMES_PATH = MODEL_DIR / "class_names.txt"
-
-IMG_SIZE = 224
+from ultralytics import YOLO
 
 
 class ObjectClassifier:
-    def __init__(self):
-        self.custom_model = None
-        self.class_names = []
+    def __init__(
+        self,
+        model_path="yolov8n.pt",
+        confidence=0.5,
+        custom_classes_dir="custom_classes"
+    ):
+        self.model_path = model_path
+        self.confidence = confidence
+        self.custom_classes_dir = Path(custom_classes_dir)
 
-        if MODEL_PATH.exists() and CLASS_NAMES_PATH.exists():
-            print("Loading custom trained model...")
-            self.custom_model = tf.keras.models.load_model(MODEL_PATH)
+        self.model = YOLO(self.model_path)
 
-            with open(CLASS_NAMES_PATH, "r") as f:
-                self.class_names = [line.strip() for line in f if line.strip()]
+        self.custom_classes_dir.mkdir(exist_ok=True)
 
-            print(f"Loaded custom classes: {self.class_names}")
-        else:
-            print("No custom model found. Using ImageNet MobileNetV2.")
-            self.custom_model = MobileNetV2(weights="imagenet")
+        self.custom_classes = {}
+        self.reload_custom_classes()
 
-    def preprocess(self, frame):
-        resized = cv2.resize(frame, (IMG_SIZE, IMG_SIZE))
-        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-        arr = np.expand_dims(rgb.astype(np.float32), axis=0)
-        return preprocess_input(arr)
+    def reload_custom_classes(self):
+        self.custom_classes = {}
 
-    def predict(self, frame):
-        x = self.preprocess(frame)
-        preds = self.custom_model.predict(x, verbose=0)
+        for class_dir in self.custom_classes_dir.iterdir():
+            if class_dir.is_dir():
+                images = [
+                    p for p in class_dir.iterdir()
+                    if p.suffix.lower() in [".jpg", ".jpeg", ".png"]
+                ]
 
-        if self.class_names:
-            idx = int(np.argmax(preds[0]))
-            confidence = float(preds[0][idx])
-            label = self.class_names[idx]
-            return label, confidence
-        else:
-            decoded = decode_predictions(preds, top=1)[0][0]
-            label = decoded[1].replace("_", " ")
-            confidence = float(decoded[2])
-            return label, confidence
+                if images:
+                    self.custom_classes[class_dir.name] = images
 
-
-def main():
-    classifier = ObjectClassifier()
-    cap = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)
-
-    if not cap.isOpened():
-        print("Could not open camera.")
-        return
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        frame = cv2.flip(frame, 1)
-
-        label, confidence = classifier.predict(frame)
-
-        cv2.putText(
-            frame,
-            f"{label} ({confidence * 100:.1f}%)",
-            (20, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 255, 0),
-            2
+        print(
+            f"Loaded {len(self.custom_classes)} custom classes: "
+            f"{', '.join(self.custom_classes.keys()) or 'none'}"
         )
 
-        cv2.imshow("Object Classifier", frame)
+    def detect(self, frame):
+        results = self.model(
+            frame,
+            conf=self.confidence,
+            verbose=False
+        )
 
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
+        result = results[0]
 
-    cap.release()
-    cv2.destroyAllWindows()
+        annotated_frame = result.plot()
 
+        detections = []
 
-if __name__ == "__main__":
-    main()
+        if result.boxes is not None:
+            for box in result.boxes:
+                class_id = int(box.cls[0])
+                confidence = float(box.conf[0])
+
+                label = self.model.names[class_id]
+
+                detections.append(
+                    {
+                        "label": label,
+                        "confidence": confidence
+                    }
+                )
+
+        detections.sort(
+            key=lambda x: x["confidence"],
+            reverse=True
+        )
+
+        return annotated_frame, detections

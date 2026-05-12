@@ -29,6 +29,7 @@ DEFAULT_STATE = {
             "color": "red"
         }
     },
+    "detected_objects": [],
     "last_updated": None
 }
 
@@ -38,10 +39,8 @@ ALIASES = {
     "bulb": "Main Light",
     "tube light": "Main Light",
     "main lights": "Main Light",
-
     "ceiling fan": "Ceiling Fan",
     "fan": "Ceiling Fan",
-
     "accent light": "Accent Light",
     "small light": "Accent Light"
 }
@@ -50,7 +49,15 @@ ALIASES = {
 def load_state():
     if STATE_FILE.exists():
         with open(STATE_FILE, "r") as f:
-            return json.load(f)
+            state = json.load(f)
+
+        if "detected_objects" not in state:
+            state["detected_objects"] = []
+
+        if "last_updated" not in state:
+            state["last_updated"] = None
+
+        return state
 
     save_state(DEFAULT_STATE.copy())
     return load_state()
@@ -74,6 +81,40 @@ def resolve_device(name: str):
             return device
 
     return None
+
+
+def normalize_detected_objects(objects):
+    normalized = []
+    seen = set()
+
+    for obj in objects:
+        if isinstance(obj, dict):
+            label = obj.get("label", "")
+        else:
+            label = str(obj)
+
+        label = label.strip().lower()
+
+        if not label:
+            continue
+
+        if label == "person":
+            continue
+
+        if label in seen:
+            continue
+
+        seen.add(label)
+        normalized.append(label)
+
+    return sorted(normalized)
+
+
+def update_detected_objects(objects):
+    state = load_state()
+    state["detected_objects"] = normalize_detected_objects(objects)
+    save_state(state)
+    return state["detected_objects"]
 
 
 @app.get("/")
@@ -106,7 +147,36 @@ def get_device(device_name: str):
         "device": {
             "name": resolved,
             **state["devices"][resolved]
-        }
+        },
+        "detected_objects": state.get("detected_objects", []),
+        "last_updated": state.get("last_updated")
+    }
+
+
+@app.get("/objects")
+def get_detected_objects():
+    state = load_state()
+
+    return {
+        "success": True,
+        "detected_objects": state.get("detected_objects", []),
+        "count": len(state.get("detected_objects", [])),
+        "last_updated": state.get("last_updated")
+    }
+
+
+@app.post("/objects")
+def set_detected_objects(payload: dict):
+    objects = payload.get("objects", [])
+    detected_objects = update_detected_objects(objects)
+
+    state = load_state()
+
+    return {
+        "success": True,
+        "detected_objects": detected_objects,
+        "count": len(detected_objects),
+        "last_updated": state.get("last_updated")
     }
 
 
@@ -173,6 +243,7 @@ def control_device(request: ControlRequest):
         "device": device_name,
         "action": action,
         "state": device,
+        "detected_objects": state.get("detected_objects", []),
         "last_updated": state["last_updated"]
     }
 

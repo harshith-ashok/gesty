@@ -3,9 +3,13 @@ import mediapipe as mp
 import math
 import time
 import json
+import requests
 from pathlib import Path
 
+from object_classifier import ObjectClassifier
+
 STATE_FILE = Path(__file__).with_name("device_state.json")
+CONTROL_SERVER_URL = "http://localhost:8120"
 
 mp_hands = mp.solutions.hands
 mp_draw = mp.solutions.drawing_utils
@@ -29,7 +33,9 @@ def load_state():
                 "status": 0,
                 "color": "red"
             }
-        }
+        },
+        "detected_objects": [],
+        "last_updated": None
     }
 
     save_state(default_state)
@@ -39,6 +45,40 @@ def load_state():
 def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
+
+
+def sync_detected_objects(detections):
+    labels = []
+    seen = set()
+
+    for detection in detections:
+        label = str(detection.get("label", "")).strip().lower()
+
+        if not label:
+            continue
+
+        if label == "person":
+            continue
+
+        if label in seen:
+            continue
+
+        seen.add(label)
+        labels.append(label)
+
+    labels.sort()
+
+    if not labels:
+        return
+
+    try:
+        requests.post(
+            f"{CONTROL_SERVER_URL}/objects",
+            json={"objects": labels},
+            timeout=2
+        )
+    except Exception:
+        pass
 
 
 def update_device(device, status, color=None, value=None):
@@ -90,13 +130,11 @@ def fingers_up(hand_landmarks):
 
     fingers = []
 
-    # Thumb
     if hand_landmarks.landmark[tips[0]].x < hand_landmarks.landmark[pips[0]].x:
         fingers.append(1)
     else:
         fingers.append(0)
 
-    # Index, Middle, Ring, Pinky
     for i in range(1, 5):
         if hand_landmarks.landmark[tips[i]].y < hand_landmarks.landmark[pips[i]].y:
             fingers.append(1)
@@ -115,7 +153,6 @@ def detect_gesture(hand_landmarks):
     thumb_tip = hand_landmarks.landmark[4]
     thumb_ip = hand_landmarks.landmark[3]
 
-    # PINCH = Ceiling Fan speed control
     pinch_dist = distance(thumb_tip, index_tip)
 
     if pinch_dist < 0.05:
@@ -123,22 +160,18 @@ def detect_gesture(hand_landmarks):
         value = max(0, min(100, value))
         return "PINCH", value
 
-    # Pointing gestures
     if fingers == [0, 1, 0, 0, 0]:
         if index_tip.y < index_pip.y:
             return "POINT UP", None
         elif index_tip.y > index_pip.y:
             return "POINT DOWN", None
 
-    # FIST = Everything OFF
     if sum(fingers) == 0:
         return "FIST", None
 
-    # PEACE = Toggle Accent Light
     if fingers == [0, 1, 1, 0, 0]:
         return "PEACE", None
 
-    # THUMBS UP = Toggle Accent Light with red color
     if fingers == [1, 0, 0, 0, 0]:
         if thumb_tip.y < thumb_ip.y:
             return "THUMBS UP", None
@@ -175,141 +208,171 @@ def draw_slider(frame, value):
     )
 
 
-cap = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)
+def main():
+    classifier = ObjectClassifier()
+    cap = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)
 
-slider_value = load_state()["devices"]["Ceiling Fan"].get("value", 0)
+    slider_value = load_state()["devices"]["Ceiling Fan"].get("value", 0)
 
-current_gesture = None
-gesture_start_time = 0
-gesture_sent = False
-last_pinch_update = 0
+    current_gesture = None
+    gesture_start_time = 0
+    gesture_sent = False
+    last_pinch_update = 0
+    last_object_sync = 0
+    object_sync_interval = 1.0
 
-with mp_hands.Hands(
-    static_image_mode=False,
-    max_num_hands=1,
-    min_detection_confidence=0.7,
-    min_tracking_confidence=0.7
-) as hands:
+    with mp_hands.Hands(
+        static_image_mode=False,
+        max_num_hands=1,
+        min_detection_confidence=0.7,
+        min_tracking_confidence=0.7
+    ) as hands:
 
-    while True:
-        success, frame = cap.read()
+        while True:
+            success, frame = cap.read()
 
-        if not success:
-            break
+            if not success:
+                break
 
-        frame = cv2.flip(frame, 1)
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        result = hands.process(rgb)
+            frame = cv2.flip(frame, 1)
 
-        detected_gesture = "NO HAND"
-        value = None
-        held_time = 0
+            annotated_frame, detections = classifier.detect(frame)
 
-        if result.multi_hand_landmarks:
-            for hand_landmarks in result.multi_hand_landmarks:
-                mp_draw.draw_landmarks(
-                    frame,
-                    hand_landmarks,
-                    mp_hands.HAND_CONNECTIONS
-                )
+            now = time.time()
+            if now - last_object_sync >= object_sync_interval:
+                sync_detected_objects(detections)
+                last_object_sync = now
 
-                detected_gesture, value = detect_gesture(hand_landmarks)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            result = hands.process(rgb)
 
-                if detected_gesture != current_gesture:
-                    current_gesture = detected_gesture
-                    gesture_start_time = time.time()
-                    gesture_sent = False
-                    last_pinch_update = 0
+            detected_gesture = "NO HAND"
+            value = None
+            held_time = 0
 
-                held_time = time.time() - gesture_start_time
+            if result.multi_hand_landmarks:
+                for hand_landmarks in result.multi_hand_landmarks:
+                    mp_draw.draw_landmarks(
+                        annotated_frame,
+                        hand_landmarks,
+                        mp_hands.HAND_CONNECTIONS
+                    )
 
-                # PINCH updates every second after being held for 3 seconds
-                if detected_gesture == "PINCH" and value is not None:
-                    slider_value = value
+                    detected_gesture, value = detect_gesture(hand_landmarks)
 
-                    if held_time >= 3:
-                        now = time.time()
+                    if detected_gesture != current_gesture:
+                        current_gesture = detected_gesture
+                        gesture_start_time = time.time()
+                        gesture_sent = False
+                        last_pinch_update = 0
 
-                        if now - last_pinch_update >= 1:
-                            update_device(
-                                "Ceiling Fan",
-                                1 if slider_value > 0 else 0,
-                                value=slider_value
-                            )
-                            last_pinch_update = now
+                    held_time = time.time() - gesture_start_time
 
-                # Other gestures trigger once after 3 seconds
-                elif held_time >= 3 and not gesture_sent:
+                    if detected_gesture == "PINCH" and value is not None:
+                        slider_value = value
 
-                    if detected_gesture == "POINT UP":
-                        # Toggle Main Light
-                        toggle_device("Main Light")
+                        if held_time >= 3:
+                            if now - last_pinch_update >= 1:
+                                update_device(
+                                    "Ceiling Fan",
+                                    1 if slider_value > 0 else 0,
+                                    value=slider_value
+                                )
+                                last_pinch_update = now
 
-                    elif detected_gesture == "POINT DOWN":
-                        # Explicit OFF for Main Light
-                        update_device("Main Light", 0)
+                    elif held_time >= 3 and not gesture_sent:
+                        if detected_gesture == "POINT UP":
+                            toggle_device("Main Light")
 
-                    elif detected_gesture == "PEACE":
-                        # Toggle Accent Light
-                        toggle_device("Accent Light")
+                        elif detected_gesture == "POINT DOWN":
+                            update_device("Main Light", 0)
 
-                    elif detected_gesture == "THUMBS UP":
-                        # Toggle Accent Light and set RED when turning ON
-                        current = get_device_state("Accent Light")
+                        elif detected_gesture == "PEACE":
+                            toggle_device("Accent Light")
 
-                        if current.get("status", 0) == 1:
+                        elif detected_gesture == "THUMBS UP":
+                            current = get_device_state("Accent Light")
+
+                            if current.get("status", 0) == 1:
+                                update_device("Accent Light", 0)
+                            else:
+                                update_device(
+                                    "Accent Light",
+                                    1,
+                                    color="red"
+                                )
+
+                        elif detected_gesture == "FIST":
+                            update_device("Main Light", 0)
+                            update_device("Ceiling Fan", 0, value=0)
                             update_device("Accent Light", 0)
-                        else:
-                            update_device(
-                                "Accent Light",
-                                1,
-                                color="red"
-                            )
+                            slider_value = 0
 
-                    elif detected_gesture == "FIST":
-                        # Turn everything OFF
-                        update_device("Main Light", 0)
-                        update_device("Ceiling Fan", 0, value=0)
-                        update_device("Accent Light", 0)
-                        slider_value = 0
+                        gesture_sent = True
+            else:
+                current_gesture = None
+                gesture_start_time = 0
+                gesture_sent = False
+                last_pinch_update = 0
 
-                    gesture_sent = True
+            cv2.putText(
+                annotated_frame,
+                detected_gesture,
+                (20, 50),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.2,
+                (0, 255, 0),
+                3
+            )
 
-        else:
-            current_gesture = None
-            gesture_start_time = 0
-            gesture_sent = False
-            last_pinch_update = 0
+            cv2.putText(
+                annotated_frame,
+                f"HOLD: {int(held_time)}s / 3s",
+                (20, 100),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 255, 255),
+                2
+            )
 
-        cv2.putText(
-            frame,
-            detected_gesture,
-            (20, 50),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1.2,
-            (0, 255, 0),
-            3
-        )
+            if detections:
+                visible_objects = []
 
-        cv2.putText(
-            frame,
-            f"HOLD: {int(held_time)}s / 3s",
-            (20, 100),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 255, 255),
-            2
-        )
+                for detection in detections:
+                    label = str(detection.get("label", "")).strip().lower()
 
-        draw_slider(frame, slider_value)
+                    if label and label != "person" and label not in visible_objects:
+                        visible_objects.append(label)
 
-        cv2.imshow(
-            "Hand Gesture Smart Home Controller",
-            frame
-        )
+                if visible_objects:
+                    cv2.putText(
+                        annotated_frame,
+                        f"OBJECTS: {', '.join(visible_objects[:3])}",
+                        (20, 150),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1,
+                        (255, 255, 0),
+                        2
+                    )
 
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
+            draw_slider(annotated_frame, slider_value)
 
-cap.release()
-cv2.destroyAllWindows()
+            cv2.imshow(
+                "Hand Gesture Smart Home Controller",
+                annotated_frame
+            )
+
+            key = cv2.waitKey(1) & 0xFF
+
+            if key == ord("q"):
+                break
+
+            if key == ord("r"):
+                classifier.reload_custom_classes()
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    main()
