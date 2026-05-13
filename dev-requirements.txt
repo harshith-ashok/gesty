@@ -1,0 +1,14 @@
+# Development dependencies (for training only, not needed on Jetson Nano)
+# Install with: pip install -r dev-requirements.txt
+
+# Optional: Gradio dashboard (resource-heavy, comment out if not needed)
+gradio==4.14.0
+
+# ML training (optional - only if building custom models on the device)
+# For Jetson Nano, use NVIDIA's PyTorch instead:
+# https://forums.developer.nvidia.com/t/pytorch-for-jetson/
+# torch torchvision  (install from NVIDIA wheels)
+
+# For model training if you must use TensorFlow:
+# tensorflow-lite (or use NVIDIA's optimized build)
+# h5py (addressed via NVIDIA pre-built images)

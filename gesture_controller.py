@@ -4,12 +4,26 @@ import math
 import time
 import json
 import requests
+import os
 from pathlib import Path
 
 from object_classifier import ObjectClassifier
+from camera_utils import open_camera, close_camera, is_jetson_nano
 
 STATE_FILE = Path(__file__).with_name("device_state.json")
 CONTROL_SERVER_URL = "http://localhost:8120"
+
+# Jetson Nano optimization settings
+JETSON_LITE_MODE = os.getenv("GESTY_LITE_MODE", "false").lower() == "true"
+JETSON_SKIP_FRAMES = int(
+    os.getenv("GESTY_SKIP_FRAMES", "1"))  # Skip every N frames
+JETSON_LOWER_RESOLUTION = os.getenv(
+    "GESTY_LOWER_RESOLUTION", "false").lower() == "true"
+JETSON_DISABLE_VISUALIZATION = os.getenv(
+    "GESTY_DISABLE_VISUALIZATION", "false").lower() == "true"
+CAMERA_USE_GSTREAMER = os.getenv(
+    "GESTY_USE_GSTREAMER", "true").lower() == "true"
+CAMERA_INDEX = int(os.getenv("GESTY_CAMERA_INDEX", "0"))
 
 mp_hands = mp.solutions.hands
 mp_draw = mp.solutions.drawing_utils
@@ -209,8 +223,23 @@ def draw_slider(frame, value):
 
 
 def main():
+    print(
+        f"Starting gesture controller (lite_mode={JETSON_LITE_MODE}, skip_frames={JETSON_SKIP_FRAMES})")
+    print(f"Jetson Nano detected: {is_jetson_nano()}")
+    print(f"GStreamer enabled: {CAMERA_USE_GSTREAMER}")
+
     classifier = ObjectClassifier()
-    cap = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)
+
+    # Open camera with GStreamer support for RPi camera
+    cap = open_camera(
+        camera_index=CAMERA_INDEX,
+        use_gstreamer=CAMERA_USE_GSTREAMER and is_jetson_nano(),
+        lower_resolution=JETSON_LOWER_RESOLUTION
+    )
+
+    if cap is None:
+        print("ERROR: Could not open camera. Check /dev/video0 and GStreamer installation.")
+        return
 
     slider_value = load_state()["devices"]["Ceiling Fan"].get("value", 0)
 
@@ -220,6 +249,7 @@ def main():
     last_pinch_update = 0
     last_object_sync = 0
     object_sync_interval = 1.0
+    frame_count = 0
 
     with mp_hands.Hands(
         static_image_mode=False,
@@ -228,150 +258,179 @@ def main():
         min_tracking_confidence=0.7
     ) as hands:
 
-        while True:
-            success, frame = cap.read()
+        try:
+            while True:
+                success, frame = cap.read()
 
-            if not success:
-                break
+                if not success:
+                    print("ERROR: Failed to read frame from camera")
+                    break
 
-            frame = cv2.flip(frame, 1)
+                frame = cv2.flip(frame, 1)
+                frame_count += 1
 
-            annotated_frame, detections = classifier.detect(frame)
+                # Skip frames for resource optimization
+                if frame_count % JETSON_SKIP_FRAMES != 0:
+                    if not JETSON_DISABLE_VISUALIZATION:
+                        cv2.imshow("Hand Gesture Smart Home Controller", frame)
+                        if cv2.waitKey(1) & 0xFF == ord("q"):
+                            break
+                    continue
 
-            now = time.time()
-            if now - last_object_sync >= object_sync_interval:
-                sync_detected_objects(detections)
-                last_object_sync = now
+                # Object detection (runs every skipped frame)
+                if JETSON_LITE_MODE:
+                    # In lite mode, only detect objects periodically
+                    detections = []
+                    now = time.time()
+                    if now - last_object_sync >= object_sync_interval * 2:
+                        _, detections = classifier.detect(frame)
+                        sync_detected_objects(detections)
+                        last_object_sync = now
+                    annotated_frame = frame
+                else:
+                    annotated_frame, detections = classifier.detect(frame)
+                    now = time.time()
+                    if now - last_object_sync >= object_sync_interval:
+                        sync_detected_objects(detections)
+                        last_object_sync = now
 
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            result = hands.process(rgb)
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                result = hands.process(rgb)
 
-            detected_gesture = "NO HAND"
-            value = None
-            held_time = 0
+                detected_gesture = "NO HAND"
+                value = None
+                held_time = 0
 
-            if result.multi_hand_landmarks:
-                for hand_landmarks in result.multi_hand_landmarks:
-                    mp_draw.draw_landmarks(
-                        annotated_frame,
-                        hand_landmarks,
-                        mp_hands.HAND_CONNECTIONS
-                    )
+                if result.multi_hand_landmarks:
+                    for hand_landmarks in result.multi_hand_landmarks:
+                        if not JETSON_DISABLE_VISUALIZATION:
+                            mp_draw.draw_landmarks(
+                                annotated_frame,
+                                hand_landmarks,
+                                mp_hands.HAND_CONNECTIONS
+                            )
 
-                    detected_gesture, value = detect_gesture(hand_landmarks)
+                        detected_gesture, value = detect_gesture(
+                            hand_landmarks)
 
-                    if detected_gesture != current_gesture:
-                        current_gesture = detected_gesture
-                        gesture_start_time = time.time()
-                        gesture_sent = False
-                        last_pinch_update = 0
+                        if detected_gesture != current_gesture:
+                            current_gesture = detected_gesture
+                            gesture_start_time = time.time()
+                            gesture_sent = False
+                            last_pinch_update = 0
 
-                    held_time = time.time() - gesture_start_time
+                        held_time = time.time() - gesture_start_time
 
-                    if detected_gesture == "PINCH" and value is not None:
-                        slider_value = value
+                        if detected_gesture == "PINCH" and value is not None:
+                            slider_value = value
 
-                        if held_time >= 3:
-                            if now - last_pinch_update >= 1:
-                                update_device(
-                                    "Ceiling Fan",
-                                    1 if slider_value > 0 else 0,
-                                    value=slider_value
-                                )
-                                last_pinch_update = now
+                            if held_time >= 3:
+                                if time.time() - last_pinch_update >= 1:
+                                    update_device(
+                                        "Ceiling Fan",
+                                        1 if slider_value > 0 else 0,
+                                        value=slider_value
+                                    )
+                                    last_pinch_update = time.time()
 
-                    elif held_time >= 3 and not gesture_sent:
-                        if detected_gesture == "POINT UP":
-                            toggle_device("Main Light")
+                        elif held_time >= 3 and not gesture_sent:
+                            if detected_gesture == "POINT UP":
+                                toggle_device("Main Light")
 
-                        elif detected_gesture == "POINT DOWN":
-                            update_device("Main Light", 0)
+                            elif detected_gesture == "POINT DOWN":
+                                update_device("Main Light", 0)
 
-                        elif detected_gesture == "PEACE":
-                            toggle_device("Accent Light")
+                            elif detected_gesture == "PEACE":
+                                toggle_device("Accent Light")
 
-                        elif detected_gesture == "THUMBS UP":
-                            current = get_device_state("Accent Light")
+                            elif detected_gesture == "THUMBS UP":
+                                current = get_device_state("Accent Light")
 
-                            if current.get("status", 0) == 1:
+                                if current.get("status", 0) == 1:
+                                    update_device("Accent Light", 0)
+                                else:
+                                    update_device(
+                                        "Accent Light",
+                                        1,
+                                        color="red"
+                                    )
+
+                            elif detected_gesture == "FIST":
+                                update_device("Main Light", 0)
+                                update_device("Ceiling Fan", 0, value=0)
                                 update_device("Accent Light", 0)
-                            else:
-                                update_device(
-                                    "Accent Light",
-                                    1,
-                                    color="red"
-                                )
+                                slider_value = 0
 
-                        elif detected_gesture == "FIST":
-                            update_device("Main Light", 0)
-                            update_device("Ceiling Fan", 0, value=0)
-                            update_device("Accent Light", 0)
-                            slider_value = 0
+                            gesture_sent = True
+                else:
+                    current_gesture = None
+                    gesture_start_time = 0
+                    gesture_sent = False
+                    last_pinch_update = 0
 
-                        gesture_sent = True
-            else:
-                current_gesture = None
-                gesture_start_time = 0
-                gesture_sent = False
-                last_pinch_update = 0
-
-            cv2.putText(
-                annotated_frame,
-                detected_gesture,
-                (20, 50),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.2,
-                (0, 255, 0),
-                3
-            )
-
-            cv2.putText(
-                annotated_frame,
-                f"HOLD: {int(held_time)}s / 3s",
-                (20, 100),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (0, 255, 255),
-                2
-            )
-
-            if detections:
-                visible_objects = []
-
-                for detection in detections:
-                    label = str(detection.get("label", "")).strip().lower()
-
-                    if label and label != "person" and label not in visible_objects:
-                        visible_objects.append(label)
-
-                if visible_objects:
+                if not JETSON_DISABLE_VISUALIZATION:
                     cv2.putText(
                         annotated_frame,
-                        f"OBJECTS: {', '.join(visible_objects[:3])}",
-                        (20, 150),
+                        detected_gesture,
+                        (20, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1.2,
+                        (0, 255, 0),
+                        3
+                    )
+
+                    cv2.putText(
+                        annotated_frame,
+                        f"HOLD: {int(held_time)}s / 3s",
+                        (20, 100),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         1,
-                        (255, 255, 0),
+                        (0, 255, 255),
                         2
                     )
 
-            draw_slider(annotated_frame, slider_value)
+                    if detections:
+                        visible_objects = []
 
-            cv2.imshow(
-                "Hand Gesture Smart Home Controller",
-                annotated_frame
-            )
+                        for detection in detections:
+                            label = str(detection.get(
+                                "label", "")).strip().lower()
 
-            key = cv2.waitKey(1) & 0xFF
+                            if label and label != "person" and label not in visible_objects:
+                                visible_objects.append(label)
 
-            if key == ord("q"):
-                break
+                        if visible_objects:
+                            cv2.putText(
+                                annotated_frame,
+                                f"OBJECTS: {', '.join(visible_objects[:3])}",
+                                (20, 150),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                1,
+                                (255, 255, 0),
+                                2
+                            )
 
-            if key == ord("r"):
-                classifier.reload_custom_classes()
+                    draw_slider(annotated_frame, slider_value)
 
-    cap.release()
-    cv2.destroyAllWindows()
+                    cv2.imshow(
+                        "Hand Gesture Smart Home Controller",
+                        annotated_frame
+                    )
+
+                key = cv2.waitKey(1) & 0xFF
+
+                if key == ord("q"):
+                    break
+
+                if key == ord("r"):
+                    classifier.reload_custom_classes()
+
+        except KeyboardInterrupt:
+            print("\nShutdown requested")
+        finally:
+            close_camera(cap)
+            cv2.destroyAllWindows()
+            print("Gesture controller stopped")
 
 
 if __name__ == "__main__":
