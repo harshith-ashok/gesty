@@ -235,7 +235,8 @@ def draw_slider(frame, value):
 
 def main():
     classifier = ObjectClassifier()
-    cap = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)
+    cap = cv2.VideoCapture(0)
+    # cap = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)
 
     slider_value = load_state()["devices"]["Ceiling Fan"].get("value", 0)
 
@@ -328,7 +329,7 @@ def main():
                                     color="red"
                                 )
 
-                        elif detected_gesture == "FIST":
+                        elif detected_gesture == "THUMBS UP":
                             update_device("Main Light", 0)
                             update_device("Ceiling Fan", 0, value=0)
                             update_device("Accent Light", 0)
