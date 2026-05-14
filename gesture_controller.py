@@ -47,12 +47,19 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 
-def sync_detected_objects(detections):
+def sync_detected_objects(detections, previous_confidences):
+    """
+    Sync detected objects to API only if confidence changes by 0.5 or greater.
+    Returns: (should_send, new_confidences, labels_to_send)
+    """
     labels = []
     seen = set()
+    current_confidences = {}
+    confidence_threshold = 0.5
 
     for detection in detections:
         label = str(detection.get("label", "")).strip().lower()
+        confidence = detection.get("confidence", 0)
 
         if not label:
             continue
@@ -64,12 +71,29 @@ def sync_detected_objects(detections):
             continue
 
         seen.add(label)
+        current_confidences[label] = confidence
         labels.append(label)
 
     labels.sort()
 
-    if not labels:
-        return
+    # Check if there's a significant change in confidence (>= 0.5)
+    should_send = False
+
+    # Check for new objects or confidence changes >= 0.5
+    for label, conf in current_confidences.items():
+        prev_conf = previous_confidences.get(label, -1)
+        if abs(conf - prev_conf) >= confidence_threshold:
+            should_send = True
+            break
+
+    # Check for objects that disappeared
+    for label in previous_confidences:
+        if label not in current_confidences:
+            should_send = True
+            break
+
+    if not labels or not should_send:
+        return False, current_confidences, None
 
     try:
         requests.post(
@@ -77,8 +101,9 @@ def sync_detected_objects(detections):
             json={"objects": labels},
             timeout=2
         )
+        return True, current_confidences, labels
     except Exception:
-        pass
+        return False, current_confidences, None
 
 
 def update_device(device, status, color=None, value=None):
@@ -218,8 +243,7 @@ def main():
     gesture_start_time = 0
     gesture_sent = False
     last_pinch_update = 0
-    last_object_sync = 0
-    object_sync_interval = 1.0
+    previous_confidences = {}  # Track confidence scores for change detection
 
     with mp_hands.Hands(
         static_image_mode=False,
@@ -238,11 +262,13 @@ def main():
 
             annotated_frame, detections = classifier.detect(frame)
 
-            now = time.time()
-            if now - last_object_sync >= object_sync_interval:
-                sync_detected_objects(detections)
-                last_object_sync = now
+            # Sync detected objects only if confidence changes significantly
+            sent, previous_confidences, labels = sync_detected_objects(
+                detections,
+                previous_confidences
+            )
 
+            now = time.time()
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             result = hands.process(rgb)
 
